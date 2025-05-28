@@ -1,0 +1,358 @@
+{
+    "name": "your_vendor/your_project_name",
+    "description": "A simple PHP project with authentication.",
+    "type": "project",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/"
+        }
+    },
+    "require": {
+        "php": ">=7.4",
+        "firebase/php-jwt": "^6.0",       // برای JWT
+        "vlucas/phpdotenv": "^5.0"        // برای .env (اختیاری اما توصیه شده)
+        // ممکن است پکیج‌های دیگری نیز نیاز شود
+    }
+}
+
+
+
+
+
+DB_HOST=localhost
+DB_NAME=your_database_name
+DB_USER=your_database_user
+DB_PASS=your_database_password
+JWT_SECRET_KEY=your_very_secret_key_for_jwt
+
+
+// app/config/app.php
+<?php
+
+return [
+    'name' => 'My PHP Project',
+    'timezone' => 'Asia/Tehran', // یا هر timezone دیگری که نیاز دارید
+    // میتونید تنظیمات بیشتری رو اینجا اضافه کنید
+];
+
+
+// app/config/database.php
+<?php
+
+// مطمئن شید که vlucas/phpdotenv رو نصب کردید و در public/index.php بارگذاری میشه
+// در غیر این صورت، این متغیرها در دسترس نخواهند بود
+
+return [
+    'driver'    => 'mysql', // یا 'pgsql' برای PostgreSQL
+    'host'      => getenv('DB_HOST'),
+    'database'  => getenv('DB_NAME'),
+    'username'  => getenv('DB_USER'),
+    'password'  => getenv('DB_PASS'),
+    'charset'   => 'utf8mb4',
+    'collation' => 'utf8mb4_unicode_ci',
+    'prefix'    => '', // اگر نیاز به پیشوند برای جدول‌ها دارید
+];
+
+
+
+
+// app/Core/Database.php
+<?php
+
+namespace App\Core;
+
+use PDO;
+use PDOException;
+
+class Database
+{
+    private static $instance = null;
+    private $conn;
+    private $config;
+
+    private function __construct()
+    {
+        // لود کردن تنظیمات دیتابیس
+        $this->config = require __DIR__ . '/../config/database.php';
+
+        $dsn = "{$this->config['driver']}:host={$this->config['host']};dbname={$this->config['database']};charset={$this->config['charset']}";
+        $options = [
+            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION, // نمایش خطاها به صورت Exception
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,       // دریافت نتایج به صورت آرایه انجمنی (associative array)
+            PDO::ATTR_EMULATE_PREPARES   => false,                  // غیرفعال کردن emulation برای Prepared Statements (امنیت بالاتر)
+        ];
+
+        try {
+            $this->conn = new PDO($dsn, $this->config['username'], $this->config['password'], $options);
+        } catch (PDOException $e) {
+            die("Connection failed: " . $e->getMessage()); // بهتره در محیط production خطای کلی نمایش داده بشه
+        }
+    }
+
+    public static function getInstance()
+    {
+        if (!self::$instance) {
+            self::$instance = new Database();
+        }
+        return self::$instance;
+    }
+
+    public function getConnection()
+    {
+        return $this->conn;
+    }
+}// app/Core/Router.php
+<?php
+
+namespace App\Core;
+
+class Router
+{
+    protected $routes = [];
+
+    /**
+     * متد برای اضافه کردن یک مسیر GET
+     * @param string $uri
+     * @param mixed $callback (string Controller@method or callable function)
+     */
+    public function get($uri, $callback)
+    {
+        $this->addRoute('GET', $uri, $callback);
+    }
+
+    /**
+     * متد برای اضافه کردن یک مسیر POST
+     * @param string $uri
+     * @param mixed $callback (string Controller@method or callable function)
+     */
+    public function post($uri, $callback)
+    {
+        $this->addRoute('POST', $uri, $callback);
+    }
+
+    /**
+     * متد اصلی برای اضافه کردن مسیرها
+     * @param string $method
+     * @param string $uri
+     * @param mixed $callback
+     */
+    protected function addRoute($method, $uri, $callback)
+    {
+        // تبدیل URI به یک الگوی Regex برای پشتیبانی از پارامترها (مثل /users/{id})
+        $uri = preg_replace('/\{([a-zA-Z0-9_]+)\}/', '([a-zA-Z0-9_]+)', $uri);
+        $this->routes[$method][$uri] = $callback;
+    }
+
+    /**
+     * درخواست ورودی را پردازش کرده و به مسیر مناسب هدایت می کند.
+     * @param string $uri
+     * @param string $method
+     */
+    public function dispatch($uri, $method)
+    {
+        // پاک کردن Query String از URI (مثلاً /posts?id=123 به /posts تبدیل می‌شود)
+        $uri = strtok($uri, '?');
+        // حذف اسلش اضافه از انتهای URI
+        $uri = rtrim($uri, '/');
+        // اگر URI خالی باشد، به '/' تبدیل می‌شود
+        if (empty($uri)) {
+            $uri = '/';
+        }
+
+        if (array_key_exists($method, $this->routes)) {
+            foreach ($this->routes[$method] as $routeUri => $callback) {
+                // مقایسه URI با الگوهای Regex
+                if (preg_match("#^" . $routeUri . "$#", $uri, $matches)) {
+                    array_shift($matches); // حذف اولین عنصر (full match)
+
+                    if (is_callable($callback)) {
+                        call_user_func_array($callback, $matches);
+                    } elseif (is_string($callback)) {
+                        // فرض می‌کنیم Callback به شکل "ControllerName@methodName" است
+                        list($controller, $method) = explode('@', $callback);
+                        $controllerName = "App\\Controllers\\" . $controller;
+
+                        if (class_exists($controllerName)) {
+                            $controllerInstance = new $controllerName();
+                            if (method_exists($controllerInstance, $method)) {
+                                call_user_func_array([$controllerInstance, $method], $matches);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // اگر هیچ مسیری پیدا نشد
+        $this->abort404();
+    }
+
+    protected function abort404()
+    {
+        http_response_code(404);
+        echo "404 Not Found";
+        exit;
+    }
+}
+
+
+
+
+--------------------------------------------
+
+// app/Core/Router.php
+<?php
+
+namespace App\Core;
+
+class Router
+{
+    protected $routes = [];
+
+    /**
+     * متد برای اضافه کردن یک مسیر GET
+     * @param string $uri
+     * @param mixed $callback (string Controller@method or callable function)
+     */
+    public function get($uri, $callback)
+    {
+        $this->addRoute('GET', $uri, $callback);
+    }
+
+    /**
+     * متد برای اضافه کردن یک مسیر POST
+     * @param string $uri
+     * @param mixed $callback (string Controller@method or callable function)
+     */
+    public function post($uri, $callback)
+    {
+        $this->addRoute('POST', $uri, $callback);
+    }
+
+    /**
+     * متد اصلی برای اضافه کردن مسیرها
+     * @param string $method
+     * @param string $uri
+     * @param mixed $callback
+     */
+    protected function addRoute($method, $uri, $callback)
+    {
+        // تبدیل URI به یک الگوی Regex برای پشتیبانی از پارامترها (مثل /users/{id})
+        $uri = preg_replace('/\{([a-zA-Z0-9_]+)\}/', '([a-zA-Z0-9_]+)', $uri);
+        $this->routes[$method][$uri] = $callback;
+    }
+
+    /**
+     * درخواست ورودی را پردازش کرده و به مسیر مناسب هدایت می کند.
+     * @param string $uri
+     * @param string $method
+     */
+    public function dispatch($uri, $method)
+    {
+        // پاک کردن Query String از URI (مثلاً /posts?id=123 به /posts تبدیل می‌شود)
+        $uri = strtok($uri, '?');
+        // حذف اسلش اضافه از انتهای URI
+        $uri = rtrim($uri, '/');
+        // اگر URI خالی باشد، به '/' تبدیل می‌شود
+        if (empty($uri)) {
+            $uri = '/';
+        }
+
+        if (array_key_exists($method, $this->routes)) {
+            foreach ($this->routes[$method] as $routeUri => $callback) {
+                // مقایسه URI با الگوهای Regex
+                if (preg_match("#^" . $routeUri . "$#", $uri, $matches)) {
+                    array_shift($matches); // حذف اولین عنصر (full match)
+
+                    if (is_callable($callback)) {
+                        call_user_func_array($callback, $matches);
+                    } elseif (is_string($callback)) {
+                        // فرض می‌کنیم Callback به شکل "ControllerName@methodName" است
+                        list($controller, $method) = explode('@', $callback);
+                        $controllerName = "App\\Controllers\\" . $controller;
+
+                        if (class_exists($controllerName)) {
+                            $controllerInstance = new $controllerName();
+                            if (method_exists($controllerInstance, $method)) {
+                                call_user_func_array([$controllerInstance, $method], $matches);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // اگر هیچ مسیری پیدا نشد
+        $this->abort404();
+    }
+
+    protected function abort404()
+    {
+        http_response_code(404);
+        echo "404 Not Found";
+        exit;
+    }
+}
+?>
+
+
+///////////////////////////////////////////
+
+
+
+// public/index.php
+<?php
+
+define('ROOT_PATH', dirname(__DIR__));
+
+require_once ROOT_PATH . '/vendor/autoload.php';
+
+use Dotenv\Dotenv;
+use App\Core\Router;
+use App\Core\Database; // برای استفاده از Database در آینده
+
+// بارگذاری متغیرهای محیطی
+$dotenv = Dotenv::createImmutable(ROOT_PATH);
+$dotenv->load();
+
+// تنظیمات Error Reporting (فقط برای محیط توسعه)
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
+// تنظیم Timezone
+date_default_timezone_set(require_once ROOT_PATH . '/app/config/app.php')['timezone'];
+
+// نمونه سازی روتر
+$router = new Router();
+
+// ----------------------------------------------------
+// تعریف مسیرها (Routes)
+// ----------------------------------------------------
+
+// مسیرهای مربوط به Home Page
+$router->get('/', 'HomeController@index');
+$router->get('/home', 'HomeController@index');
+
+// مسیرهای مربوط به احراز هویت (Sign Up, Sign In)
+$router->get('/signup', 'AuthController@showSignupForm');
+$router->post('/signup', 'AuthController@signup');
+$router->get('/signin', 'AuthController@showSigninForm');
+$router->post('/signin', 'AuthController@signin');
+$router->get('/logout', 'AuthController@logout'); // برای خروج
+
+// مسیرهای مربوط به پروفایل کاربر
+$router->get('/profile', 'UserController@showProfile');
+$router->post('/profile/edit', 'UserController@updateProfile'); // یا PUT/PATCH
+
+// مسیرهای API (مثال)
+// $router->get('/api/users/{id}', 'ApiController@getUser');
+// $router->post('/api/users', 'ApiController@createUser');
+
+// ----------------------------------------------------
+// اجرای روتر
+// ----------------------------------------------------
+$router->dispatch($_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD']);
