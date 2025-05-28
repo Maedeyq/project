@@ -21,13 +21,6 @@ ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 
 // تنظیم Timezone
-$appConfig = require_once ROOT_PATH . '/app/config/app.php';
-if (is_array($appConfig) && isset($appConfig['timezone'])) {
-    date_default_timezone_set($appConfig['timezone']);
-} else {
-    // Handle error: config file missing or invalid
-    die('Invalid app configuration: timezone not set.');
-}
 
 // در این مرحله، ما هنوز سیستم روتینگ رو نساختیم.
 // فعلاً برای تست اتصال به دیتابیس میتونیم از کد زیر استفاده کنیم:
